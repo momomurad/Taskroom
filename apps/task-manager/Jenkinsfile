@@ -1,0 +1,395 @@
+pipeline {
+    agent any
+
+    tools {
+        nodejs 'node24'
+    }
+
+    options {
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['DEPLOY', 'ROLLBACK'],
+            description: 'DEPLOY builds and publishes the current commit. ROLLBACK deploys an existing image tag.'
+        )
+        string(
+            name: 'ROLLBACK_TAG',
+            defaultValue: '',
+            description: 'Existing shared API/UI image tag to deploy when ACTION=ROLLBACK, for example 26-1716544.'
+        )
+    }
+
+    triggers {
+        pollSCM('H/2 * * * *')
+    }
+
+    environment {
+        API_IMAGE = 'momo1029/task-manager-api'
+        UI_IMAGE = 'momo1029/task-manager-ui'
+    }
+
+    stages {
+        stage('Check tools') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            steps {
+                sh 'node --version'
+                sh 'npm --version'
+                sh 'docker info --format "{{.ServerVersion}}"'
+            }
+        }
+
+        stage('Install dependencies') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            steps {
+                dir('apps/task-manager') {
+                    sh 'npm ci'
+                }
+            }
+        }
+
+        stage('Backend tests') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            options {
+                timeout(time: 5, unit: 'MINUTES')
+            }
+            steps {
+                dir('apps/task-manager') {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        db_name="taskroom-ci-$(node -p "require('node:crypto').randomBytes(8).toString('hex')")"
+                        cleanup() {
+                            docker rm -f -v "$db_name" >/dev/null 2>&1 || true
+                        }
+                        trap cleanup EXIT
+                        trap 'exit 130' INT
+                        trap 'exit 143' TERM
+
+                        POSTGRES_PASSWORD=$(node -p "require('node:crypto').randomBytes(24).toString('hex')")
+                        export POSTGRES_PASSWORD
+
+                        docker run -d --rm --name "$db_name" \
+                            --tmpfs /var/lib/postgresql/data:rw \
+                            --publish 127.0.0.1::5432 \
+                            --env POSTGRES_USER=taskmanager \
+                            --env POSTGRES_DB=taskmanager_test \
+                            --env POSTGRES_PASSWORD \
+                            postgres:17-alpine >/dev/null
+
+                        ready=false
+                        for attempt in $(seq 1 30); do
+                            if docker exec "$db_name" pg_isready \
+                                -h 127.0.0.1 -U taskmanager -d taskmanager_test \
+                                >/dev/null 2>&1; then
+                                ready=true
+                                break
+                            fi
+                            sleep 2
+                        done
+
+                        if [ "$ready" != true ]; then
+                            echo 'Test database did not become ready within 60 seconds.'
+                            docker logs --tail 50 "$db_name"
+                            exit 1
+                        fi
+
+                        db_endpoint=$(docker port "$db_name" 5432/tcp)
+                        export DATABASE_URL="postgresql://taskmanager:${POSTGRES_PASSWORD}@127.0.0.1:${db_endpoint##*:}/taskmanager_test"
+
+                        npm test
+                    '''
+                }
+            }
+        }
+
+        stage('Build frontend') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            steps {
+                dir('apps/task-manager') {
+                    sh 'npm run build'
+                }
+            }
+        }
+
+        stage('SonarQube analysis') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            options {
+                timeout(time: 15, unit: 'MINUTES')
+            }
+            steps {
+                dir('apps/task-manager') {
+                    script {
+                        def scannerHome = tool 'SonarScanner'
+                        withSonarQubeEnv(installationName: 'sonarqube-taskroom', credentialsId: 'SonarQube') {
+                            withEnv(["SCANNER_HOME=${scannerHome}"]) {
+                                sh '''
+                                    set +x
+                                    set -eu
+                                    export SONAR_TOKEN="$SONAR_AUTH_TOKEN"
+                                    "$SCANNER_HOME/bin/sonar-scanner"
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Quality gate') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            options {
+                timeout(time: 10, unit: 'MINUTES')
+            }
+            steps {
+                waitForQualityGate abortPipeline: true
+            }
+        }
+
+        stage('Build Docker images') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            steps {
+                script {
+                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+                }
+                dir('apps/task-manager') {
+                    sh '''
+                        set -eu
+                        docker build -f backend/Dockerfile \
+                            -t "${API_IMAGE}:${IMAGE_TAG}" \
+                            -t "${API_IMAGE}:latest" \
+                            .
+                        docker build -f frontend/Dockerfile \
+                            -t "${UI_IMAGE}:${IMAGE_TAG}" \
+                            -t "${UI_IMAGE}:latest" \
+                            .
+                    '''
+                }
+            }
+        }
+
+        stage('Push Docker images') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-creds',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        set +x
+                        set -eu
+                        printf '%s' "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        docker push "${API_IMAGE}:${IMAGE_TAG}"
+                        docker push "${API_IMAGE}:latest"
+                        docker push "${UI_IMAGE}:${IMAGE_TAG}"
+                        docker push "${UI_IMAGE}:latest"
+                        docker logout
+                    '''
+                }
+            }
+        }
+        stage('Deploy to Minikube') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            steps {
+                sh '''
+                    set -eu
+
+                    remote_host="vagrant@192.168.56.30"
+                    ssh_key="/var/lib/jenkins/.ssh/k8s_deploy_key"
+                    ssh_opts="-i ${ssh_key} -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes"
+                    remote_dir="/tmp/task-manager-k8s"
+
+                    if [ ! -r "${ssh_key}" ]; then
+                        echo "Missing SSH key: ${ssh_key}"
+                        echo 'Create the Jenkins-to-k8s SSH key before deploying.'
+                        exit 1
+                    fi
+
+                    ssh ${ssh_opts} "${remote_host}" "mkdir -p ${remote_dir}"
+                    scp ${ssh_opts} kubernetes/task-manager/*.yaml "${remote_host}:${remote_dir}/"
+
+                    ssh ${ssh_opts} "${remote_host}" \
+                        API_IMAGE="${API_IMAGE}" UI_IMAGE="${UI_IMAGE}" IMAGE_TAG="${IMAGE_TAG}" \
+                        bash -s <<'REMOTE_DEPLOY'
+                    set -eu
+
+                    kubectl version --client=true
+                    kubectl apply -f /tmp/task-manager-k8s/namespace.yaml
+
+                    if ! kubectl -n task-manager get secret task-manager-db >/dev/null 2>&1; then
+                        echo 'Missing Kubernetes secret: task-manager-db'
+                        echo 'Create it on the k8s VM before deploying:'
+                        echo 'kubectl -n task-manager create secret generic task-manager-db --from-literal=password=YOUR_PASSWORD'
+                        exit 1
+                    fi
+
+                    kubectl apply -f /tmp/task-manager-k8s/postgres.yaml
+                    kubectl apply -f /tmp/task-manager-k8s/backend.yaml
+                    kubectl apply -f /tmp/task-manager-k8s/frontend.yaml
+                    kubectl apply -f /tmp/task-manager-k8s/monitoring.yaml
+                    kubectl apply -f /tmp/task-manager-k8s/grafana-dashboard.yaml
+                    kubectl apply -f /tmp/task-manager-k8s/alerts.yaml
+
+                    kubectl -n task-manager set image deployment/backend backend="${API_IMAGE}:${IMAGE_TAG}"
+                    kubectl -n task-manager set image deployment/frontend frontend="${UI_IMAGE}:${IMAGE_TAG}"
+
+                    kubectl -n task-manager rollout status deployment/database --timeout=120s
+                    kubectl -n task-manager rollout status deployment/backend --timeout=120s
+                    kubectl -n task-manager rollout status deployment/frontend --timeout=120s
+REMOTE_DEPLOY
+                '''
+            }
+        }
+        stage('Rollback in Minikube') {
+            when {
+                expression { params.ACTION == 'ROLLBACK' }
+            }
+            options {
+                timeout(time: 5, unit: 'MINUTES')
+            }
+            steps {
+                sh '''
+                    set -eu
+
+                    case "${ROLLBACK_TAG}" in
+                        ''|[.-]*|*[!A-Za-z0-9_.-]*)
+                            echo 'ROLLBACK_TAG must be a valid existing Docker tag, for example 26-1716544.'
+                            exit 1
+                            ;;
+                    esac
+
+                    if [ "${#ROLLBACK_TAG}" -gt 128 ]; then
+                        echo 'ROLLBACK_TAG must be 128 characters or fewer.'
+                        exit 1
+                    fi
+
+                    echo "Checking rollback images for tag ${ROLLBACK_TAG}."
+                    docker manifest inspect "${API_IMAGE}:${ROLLBACK_TAG}" >/dev/null
+                    docker manifest inspect "${UI_IMAGE}:${ROLLBACK_TAG}" >/dev/null
+
+                    remote_host="vagrant@192.168.56.30"
+                    ssh_key="/var/lib/jenkins/.ssh/k8s_deploy_key"
+                    ssh_opts="-i ${ssh_key} -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes"
+
+                    if [ ! -r "${ssh_key}" ]; then
+                        echo "Missing SSH key: ${ssh_key}"
+                        exit 1
+                    fi
+
+                    ssh ${ssh_opts} "${remote_host}" \
+                        API_IMAGE="${API_IMAGE}" UI_IMAGE="${UI_IMAGE}" ROLLBACK_TAG="${ROLLBACK_TAG}" \
+                        bash -s <<'REMOTE_ROLLBACK'
+                    set -eu
+
+                    echo "Rolling Taskroom back to image tag ${ROLLBACK_TAG}."
+                    echo 'Images before rollback:'
+                    kubectl -n task-manager get deployment backend frontend \
+                        -o custom-columns='DEPLOYMENT:.metadata.name,IMAGE:.spec.template.spec.containers[0].image'
+
+                    kubectl -n task-manager set image deployment/backend \
+                        backend="${API_IMAGE}:${ROLLBACK_TAG}"
+                    kubectl -n task-manager set image deployment/frontend \
+                        frontend="${UI_IMAGE}:${ROLLBACK_TAG}"
+
+                    kubectl -n task-manager rollout status deployment/backend --timeout=120s
+                    kubectl -n task-manager rollout status deployment/frontend --timeout=120s
+
+                    echo 'Images after rollback:'
+                    kubectl -n task-manager get deployment backend frontend \
+                        -o custom-columns='DEPLOYMENT:.metadata.name,IMAGE:.spec.template.spec.containers[0].image'
+REMOTE_ROLLBACK
+                '''
+            }
+        }
+        stage('Post-deploy smoke test') {
+            steps {
+                sh '''
+                    set -eu
+
+                    ssh -i /var/lib/jenkins/.ssh/k8s_deploy_key \
+                        -o StrictHostKeyChecking=accept-new \
+                        -o IdentitiesOnly=yes \
+                        vagrant@192.168.56.30 \
+                        bash -s <<'REMOTE_SMOKE'
+                    set -eu
+
+                    sudo systemctl restart task-manager-port-forward.service
+
+                    ready=false
+                    for attempt in $(seq 1 30); do
+                        if curl -fsS http://localhost:8083/api/ready >/dev/null; then
+                            ready=true
+                            break
+                        fi
+                        sleep 2
+                    done
+
+                    if [ "${ready}" != true ]; then
+                        echo 'Taskroom frontend/backend did not become ready on localhost:8083.'
+                        sudo systemctl status task-manager-port-forward.service --no-pager || true
+                        sudo journalctl -u task-manager-port-forward.service -n 50 --no-pager || true
+                        exit 1
+                    fi
+
+                    curl -fsSI http://localhost:8083
+                    curl -fsS http://localhost:8083/api/ready
+
+                    backend_pf_log=/tmp/taskroom-backend-port-forward.log
+                    backend_pf_pid=""
+                    cleanup_smoke() {
+                        if [ -n "${backend_pf_pid}" ]; then
+                            kill "${backend_pf_pid}" >/dev/null 2>&1 || true
+                        fi
+                    }
+                    trap cleanup_smoke EXIT
+
+                    kubectl -n task-manager port-forward --address 127.0.0.1 svc/backend 18083:3001 >"${backend_pf_log}" 2>&1 &
+                    backend_pf_pid=$!
+
+                    metrics_ready=false
+                    for attempt in $(seq 1 30); do
+                        if curl -fsS http://127.0.0.1:18083/metrics | grep 'taskroom_up 1'; then
+                            metrics_ready=true
+                            break
+                        fi
+                        sleep 2
+                    done
+
+                    if [ "${metrics_ready}" != true ]; then
+                        echo 'Taskroom backend metrics did not become ready through port-forward.'
+                        cat "${backend_pf_log}" || true
+                        kubectl -n task-manager get pods,svc,endpoints
+                        exit 1
+                    fi
+
+                    kubectl -n monitoring get servicemonitor taskroom-backend
+                    kubectl -n monitoring get configmap taskroom-grafana-dashboard
+                    kubectl -n monitoring get prometheusrule taskroom-alerts
+REMOTE_SMOKE
+                '''
+            }
+        }
+    }
+}
