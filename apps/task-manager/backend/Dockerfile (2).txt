@@ -1,0 +1,14 @@
+WORKDIR /app
+
+# Copy root package files from the backend directory
+COPY package*.json ./
+
+# Install production dependencies
+RUN npm ci --omit=dev
+
+# Copy application source code
+COPY . .
+
+USER node
+EXPOSE 3001
+CMD ["node", "index.js"]
