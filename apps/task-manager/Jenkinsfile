@@ -37,7 +37,6 @@ pipeline {
                 expression { params.ACTION == 'DEPLOY' }
             }
             steps {
-		        sh 'sudo usermod -aG docker jenkins'
                 sh 'node --version'
                 sh 'npm --version'
                 sh 'docker info --format "{{.ServerVersion}}"'
