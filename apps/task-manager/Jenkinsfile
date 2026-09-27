@@ -155,10 +155,10 @@ pipeline {
                     sh '''
                         set +x
                         set -eu
-                        sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
-                        docker push "\({API_IMAGE}:\){IMAGE_TAG}"
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        docker push "${API_IMAGE}:${IMAGE_TAG}"
                         docker push "${API_IMAGE}:latest"
-                        docker push "\({UI_IMAGE}:\){IMAGE_TAG}"
+                        docker push "${UI_IMAGE}:${IMAGE_TAG}"
                         docker push "${UI_IMAGE}:latest"
                         docker logout
                     '''
