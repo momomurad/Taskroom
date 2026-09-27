@@ -147,30 +147,28 @@ pipeline {
             }
         }
 
-        stage('Push Docker images') {
-            when {
-                expression { params.ACTION == 'DEPLOY' }
-            }
-            steps {
-        withCredentials([usernamePassword(credentialsId: 'YOUR_EXISTING_ID', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-            sh 'echo "\(DOCKER_PASS" | docker login -u "\)DOCKER_USER" --password-stdin'
-            sh 'docker push ...'
+Here is the cleaned-up and fixed version of your Push Docker images stage:
+
+Groovy
+stage('Push Docker images') {
+    when {
+        expression { params.ACTION == 'DEPLOY' }
+    }
+    steps {
+        withCredentials([usernamePassword(credentialsId: 'docker-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+            sh '''
+                set +x
+                set -eu
+                printf '%s' "\(DOCKER_PASS" | docker login -u "\)DOCKER_USER" --password-stdin
+                docker push "\({API_IMAGE}:\){IMAGE_TAG}"
+                docker push "${API_IMAGE}:latest"
+                docker push "\({UI_IMAGE}:\){IMAGE_TAG}"
+                docker push "${UI_IMAGE}:latest"
+                docker logout
+            '''
         }
     }
-                 {
-                    sh '''
-                        set +x
-                        set -eu
-                        printf '%s' "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                        docker push "${API_IMAGE}:${IMAGE_TAG}"
-                        docker push "${API_IMAGE}:latest"
-                        docker push "${UI_IMAGE}:${IMAGE_TAG}"
-                        docker push "${UI_IMAGE}:latest"
-                        docker logout
-                    '''
-                }
-            }
-        }
+}
         stage('Deploy to Minikube') {
             when {
                 expression { params.ACTION == 'DEPLOY' }
