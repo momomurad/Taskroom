@@ -1,0 +1,84 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: taskroom-backend
+  namespace: monitoring
+  labels:
+    release: prometheus
+    app: taskroom
+spec:
+  namespaceSelector:
+    matchNames:
+      - task-manager
+  selector:
+    matchLabels:
+      app: task-manager
+      component: backend
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: taskroom-alerts
+  namespace: monitoring
+  labels:
+    release: prometheus
+    app: taskroom
+spec:
+  groups:
+    - name: taskroom.rules
+      rules:
+        - alert: TaskroomBackendDown
+          expr: taskroom_up == 0 or absent(taskroom_up)
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: Taskroom backend metrics are unavailable
+            description: Prometheus cannot scrape taskroom_up from the Taskroom backend.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: taskroom-grafana-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    app: taskroom
+data:
+  taskroom-dashboard.json: |
+    {
+      "schemaVersion": 39,
+      "title": "Taskroom",
+      "tags": ["taskroom"],
+      "timezone": "browser",
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Backend Up",
+          "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+          "targets": [
+            { "expr": "taskroom_up", "legendFormat": "backend" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "HTTP Requests",
+          "gridPos": { "x": 6, "y": 0, "w": 12, "h": 8 },
+          "targets": [
+            { "expr": "sum by (method, route, status) (rate(taskroom_http_requests_total[5m]))", "legendFormat": "{{method}} {{route}} {{status}}" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Process Memory",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+          "targets": [
+            { "expr": "taskroom_process_memory_bytes", "legendFormat": "{{type}}" }
+          ]
+        }
+      ]
+    }

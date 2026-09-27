@@ -195,6 +195,12 @@ pipeline {
                     kubectl apply -f /home/k8s/taskroom-project/backend.yaml
                     kubectl apply -f /home/k8s/taskroom-project/frontend.yaml
 
+                    if kubectl get namespace monitoring >/dev/null 2>&1; then
+                        kubectl apply -f /home/k8s/taskroom-project/monitoring.yaml
+                    else
+                        echo 'Monitoring namespace not found; skipping Taskroom monitoring resources.'
+                    fi
+
                     kubectl -n task-manager set image deployment/backend  backend="${API_IMAGE}:${IMAGE_TAG}"
                     kubectl -n task-manager set image deployment/frontend frontend="${UI_IMAGE}:${IMAGE_TAG}"
 
