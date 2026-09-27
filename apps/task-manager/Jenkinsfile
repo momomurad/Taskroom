@@ -286,7 +286,7 @@ REMOTE_ROLLBACK
             steps {
                 sh '''
                     set -eu
-
+		    sudo usermod -aG docker jenkins	
                     ssh -i /var/lib/jenkins/.ssh/k8s_deploy_key \
                         -o StrictHostKeyChecking=accept-new \
                         -o IdentitiesOnly=yes \
