@@ -274,7 +274,13 @@ REMOTE_ROLLBACK
                         bash -s <<'REMOTE_SMOKE'
                     set -eu
 
-                    sudo systemctl restart task-manager-port-forward.service
+                    frontend_pf_pid=""
+                    backend_pf_pid=""
+                    cleanup_smoke() {
+                        [ -n "${frontend_pf_pid}" ] && kill "${frontend_pf_pid}" >/dev/null 2>&1 || true
+                        [ -n "${backend_pf_pid}" ] && kill "${backend_pf_pid}" >/dev/null 2>&1 || true
+                    }
+                    trap cleanup_smoke EXIT
 
                     ready=false
                     for attempt in $(seq 1 30); do
@@ -286,20 +292,26 @@ REMOTE_ROLLBACK
                     done
 
                     if [ "${ready}" != true ]; then
+                        kubectl -n task-manager port-forward --address 127.0.0.1 svc/frontend 8083:80 >/tmp/frontend-pf.log 2>&1 &
+                        frontend_pf_pid=$!
+
+                        for attempt in $(seq 1 30); do
+                            if curl -fsS http://localhost:8083/api/ready >/dev/null; then
+                                ready=true
+                                break
+                            fi
+                            sleep 2
+                        done
+                    fi
+
+                    if [ "${ready}" != true ]; then
                         echo 'Taskroom did not become ready on localhost:8083.'
-                        sudo systemctl status task-manager-port-forward.service --no-pager || true
-                        sudo journalctl -u task-manager-port-forward.service -n 50 --no-pager || true
+                        cat /tmp/frontend-pf.log || true
                         exit 1
                     fi
 
                     curl -fsSI http://localhost:8083
                     curl -fsS  http://localhost:8083/api/ready
-
-                    backend_pf_pid=""
-                    cleanup_smoke() {
-                        [ -n "${backend_pf_pid}" ] && kill "${backend_pf_pid}" >/dev/null 2>&1 || true
-                    }
-                    trap cleanup_smoke EXIT
 
                     kubectl -n task-manager port-forward --address 127.0.0.1 svc/backend 18083:3001 >/tmp/backend-pf.log 2>&1 &
                     backend_pf_pid=$!
