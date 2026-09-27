@@ -137,7 +137,7 @@ pipeline {
             when { expression { params.ACTION == 'DEPLOY' } }
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: 'docker',
+                    credentialsId: 'Docker',
                     usernameVariable: 'DOCKER_USER',
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
