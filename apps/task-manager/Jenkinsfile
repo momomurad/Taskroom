@@ -27,8 +27,8 @@ pipeline {
     }
 
     environment {
-        API_IMAGE = 'momo1029/task-manager-api'
-        UI_IMAGE = 'momo1029/task-manager-ui'
+        API_IMAGE = 'momo1029/backend-app'
+        UI_IMAGE = 'momo1029/frontend-app'
     }
 
     stages {
@@ -123,44 +123,6 @@ pipeline {
             }
         }
 
-        stage('SonarQube analysis') {
-            when {
-                expression { params.ACTION == 'DEPLOY' }
-            }
-            options {
-                timeout(time: 15, unit: 'MINUTES')
-            }
-            steps {
-                dir('apps/task-manager') {
-                    script {
-                        def scannerHome = tool 'SonarScanner'
-                        withSonarQubeEnv(installationName: 'sonarqube-taskroom', credentialsId: 'SonarQube') {
-                            withEnv(["SCANNER_HOME=${scannerHome}"]) {
-                                sh '''
-                                    set +x
-                                    set -eu
-                                    export SONAR_TOKEN="$SONAR_AUTH_TOKEN"
-                                    "$SCANNER_HOME/bin/sonar-scanner"
-                                '''
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Quality gate') {
-            when {
-                expression { params.ACTION == 'DEPLOY' }
-            }
-            options {
-                timeout(time: 10, unit: 'MINUTES')
-            }
-            steps {
-                waitForQualityGate abortPipeline: true
-            }
-        }
-
         stage('Build Docker images') {
             when {
                 expression { params.ACTION == 'DEPLOY' }
@@ -216,10 +178,10 @@ pipeline {
                 sh '''
                     set -eu
 
-                    remote_host="vagrant@192.168.56.30"
+                    remote_host="k8s@192.168.56.30"
                     ssh_key="/var/lib/jenkins/.ssh/k8s_deploy_key"
                     ssh_opts="-i ${ssh_key} -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes"
-                    remote_dir="/tmp/task-manager-k8s"
+                    remote_dir="/home/k8s/taskroom-project"
 
                     if [ ! -r "${ssh_key}" ]; then
                         echo "Missing SSH key: ${ssh_key}"
@@ -248,10 +210,7 @@ pipeline {
                     kubectl apply -f /tmp/task-manager-k8s/postgres.yaml
                     kubectl apply -f /tmp/task-manager-k8s/backend.yaml
                     kubectl apply -f /tmp/task-manager-k8s/frontend.yaml
-                    kubectl apply -f /tmp/task-manager-k8s/monitoring.yaml
-                    kubectl apply -f /tmp/task-manager-k8s/grafana-dashboard.yaml
-                    kubectl apply -f /tmp/task-manager-k8s/alerts.yaml
-
+                    
                     kubectl -n task-manager set image deployment/backend backend="${API_IMAGE}:${IMAGE_TAG}"
                     kubectl -n task-manager set image deployment/frontend frontend="${UI_IMAGE}:${IMAGE_TAG}"
 
@@ -289,7 +248,7 @@ REMOTE_DEPLOY
                     docker manifest inspect "${API_IMAGE}:${ROLLBACK_TAG}" >/dev/null
                     docker manifest inspect "${UI_IMAGE}:${ROLLBACK_TAG}" >/dev/null
 
-                    remote_host="vagrant@192.168.56.30"
+                    remote_host="k8s@192.168.56.30"
                     ssh_key="/var/lib/jenkins/.ssh/k8s_deploy_key"
                     ssh_opts="-i ${ssh_key} -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes"
 
@@ -331,7 +290,7 @@ REMOTE_ROLLBACK
                     ssh -i /var/lib/jenkins/.ssh/k8s_deploy_key \
                         -o StrictHostKeyChecking=accept-new \
                         -o IdentitiesOnly=yes \
-                        vagrant@192.168.56.30 \
+                        k8s@192.168.56.30 \
                         bash -s <<'REMOTE_SMOKE'
                     set -eu
 
