@@ -115,7 +115,7 @@ pipeline {
                 expression { params.ACTION == 'DEPLOY' }
             }
             options {
-                timeout(time: 15, unit: 'MINUTES')
+                timeout(time: 60, unit: 'MINUTES')
             }
             steps {
                 dir('apps/task-manager') {
