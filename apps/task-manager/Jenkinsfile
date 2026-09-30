@@ -110,7 +110,43 @@ pipeline {
                 }
             }
         }
+        stage('SonarQube analysis') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            options {
+                timeout(time: 15, unit: 'MINUTES')
+            }
+            steps {
+                dir('apps/task-manager') {
+                    script {
+                        def scannerHome = tool 'SonarScanner'
+                        withSonarQubeEnv(installationName: 'sonarqube-taskroom', credentialsId: 'SonarQube') {
+                            withEnv(["SCANNER_HOME=${scannerHome}"]) {
+                                sh '''
+                                    set +x
+                                    set -eu
+                                    export SONAR_TOKEN="$SONAR_AUTH_TOKEN"
+                                    "$SCANNER_HOME/bin/sonar-scanner"
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
+        stage('Quality gate') {
+            when {
+                expression { params.ACTION == 'DEPLOY' }
+            }
+            options {
+                timeout(time: 10, unit: 'MINUTES')
+            }
+            steps {
+                waitForQualityGate abortPipeline: true
+            }
+        }
         stage('Build Docker images') {
             when { expression { params.ACTION == 'DEPLOY' } }
             steps {
