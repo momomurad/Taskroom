@@ -120,8 +120,8 @@ pipeline {
             steps {
                 dir('apps/task-manager') {
                     script {
-                        def scannerHome = tool 'SonarScanner'
-                        withSonarQubeEnv(installationName: 'sonarqube-taskroom', credentialsId: 'SonarQube') {
+                        def scannerHome = tool 'sonarqube'
+                        withSonarQubeEnv(installationName: 'taskroom', credentialsId: 'jenkins') {
                             withEnv(["SCANNER_HOME=${scannerHome}"]) {
                                 sh '''
                                     set +x
